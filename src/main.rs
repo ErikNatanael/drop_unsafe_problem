@@ -1,3 +1,5 @@
+use std::{cell::UnsafeCell, sync::Arc};
+
 trait Gen {
     fn process(&mut self) -> f32;
 }
@@ -18,38 +20,54 @@ struct Node {
 }
 
 struct World {
-    owned: Vec<Box<Node>>,
+    owned: Arc<UnsafeCell<Vec<Box<Node>>>>,
 }
 impl World {
     fn create_audio_task(&mut self) -> AudioThreadTask {
+        let nodes = unsafe { &mut *self.owned.get() };
+        let nodes = nodes
+            .iter_mut()
+            .map(|n| (&mut **n) as *mut Node) //(&mut (*n)) as *mut Node)
+            .collect();
         AudioThreadTask {
-            node: &mut (*self.owned[0]) as *mut Node,
+            nodes,
+            _arc_nodes: self.owned.clone(),
         }
+    }
+    fn push(&mut self, node: Node) {
+        unsafe { &mut *self.owned.get() }.push(Box::new(node))
     }
 }
 
 struct AudioThreadTask {
-    node: *mut Node,
+    nodes: Vec<*mut Node>,
+    // This exists only so that the nodes won't get dropped.
+    _arc_nodes: Arc<UnsafeCell<Vec<Box<Node>>>>,
 }
 
 unsafe impl Send for AudioThreadTask {}
 
 impl AudioThreadTask {
-    fn process(&mut self) -> f32 {
-        let node = unsafe { &mut *self.node };
-        node.gen.process()
+    fn process(&mut self, output: &mut f32) {
+        for node in &self.nodes {
+            let node = unsafe { &mut **node };
+            *output += node.gen.process();
+        }
     }
 }
 
 fn main() {
     let osc = Osc { data: 0.0 };
     let node = Node { gen: Box::new(osc) };
-    let mut world = World { owned: vec![] };
-    world.owned.push(Box::new(node));
+    let mut world = World {
+        owned: Arc::new(UnsafeCell::new(vec![])),
+    };
+    world.push(node);
     let mut audio_thread_task = world.create_audio_task();
     std::thread::spawn(move || loop {
         // The "audio thread". In reality, output would be piped to the sound card here
-        let value = audio_thread_task.process();
+        let mut value = 0.0;
+        audio_thread_task.process(&mut value);
         println!("{value}");
         std::thread::sleep(std::time::Duration::from_millis(100));
     });
