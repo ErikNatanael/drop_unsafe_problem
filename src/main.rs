@@ -51,6 +51,7 @@ impl Drop for World {
             "Dropping World, flag: {}",
             self.drop_flag.load(Ordering::Relaxed)
         );
+        // TODO: If the AudioThreadTask is on the same thread we don't need to block here, we're done
         let mut last_drop_count = self.drop_count.load(Ordering::SeqCst);
         while last_drop_count > 0 {
             let new_drop_count = self.drop_count.load(Ordering::Relaxed);
@@ -73,16 +74,15 @@ unsafe impl Send for AudioThreadTask {}
 
 impl AudioThreadTask {
     fn process(&mut self, output: &mut f32) -> bool {
+        if self.drop_flag.load(Ordering::Relaxed) {
+            self.drop_count.fetch_sub(1, Ordering::Relaxed);
+            return true;
+        }
         for node in &mut self.nodes {
             let node = unsafe { &mut **node };
             *output += node.gen.process();
         }
-        if self.drop_flag.load(Ordering::Relaxed) {
-            self.drop_count.fetch_sub(1, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
+        false
     }
 }
 
@@ -110,6 +110,7 @@ fn main() {
         let mut value = 0.0;
         let release = audio_thread_task.process(&mut value);
         if release {
+            // In reality, the audio thread callback would first send the AudioThreadTask back to the main thread for deallocation.
             return;
         }
         println!("{value}");
